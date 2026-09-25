@@ -1,4 +1,6 @@
-<!DOCTYPE html>
+import os
+
+LOGIN_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -121,3 +123,12 @@
     </div>
 </body>
 </html>
+"""
+
+def update_login():
+    os.makedirs("src/darkweb_scanner/dashboard/templates", exist_ok=True)
+    with open("src/darkweb_scanner/dashboard/templates/login.html", "w", encoding="utf-8") as f:
+        f.write(LOGIN_HTML)
+
+if __name__ == "__main__":
+    update_login()

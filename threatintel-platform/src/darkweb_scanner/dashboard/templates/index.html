@@ -323,7 +323,8 @@
         <div class="content-area">
             
             <!-- DASHBOARD TAB -->
-            <div id="tab-dashboard" class="tab-content active dashboard-grid">
+            <div id="tab-dashboard" class="tab-content active">
+                <div class="dashboard-grid">
                 <div class="stat-grid">
                     <div class="stat-card">
                         <div class="stat-title">Dark Web Sources</div>
@@ -382,6 +383,7 @@
                             </div>
                         </div>
                     </div>
+                </div>
                 </div>
             </div>
 
@@ -736,6 +738,61 @@
 
         function downloadReport() {
             window.location.href = '/api/report/pdf';
+        }
+
+        async function startMonitor() {
+            try {
+                const res = await fetch('/api/crawl/start', { method: 'POST' });
+                if(res.ok) {
+                    alert("Monitoring started successfully.");
+                    checkTor();
+                } else {
+                    const err = await res.json();
+                    alert("Failed to start: " + (err.error || "Unknown error"));
+                }
+            } catch(e) {
+                alert("Error starting monitoring.");
+            }
+        }
+
+        async function addSource() {
+            const url = prompt("Enter new .onion source URL:");
+            if(!url) return;
+            try {
+                const res = await fetch('/api/seeds', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ url: url, name: url, category: 'Dark Web', is_active: true })
+                });
+                if(res.ok) {
+                    alert("Source added.");
+                    loadDashboard();
+                } else {
+                    alert("Failed to add source.");
+                }
+            } catch(e) {
+                alert("Error adding source.");
+            }
+        }
+
+        async function addKeyword() {
+            const kw = prompt("Enter new keyword:");
+            if(!kw) return;
+            try {
+                const res = await fetch('/api/keywords', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ keyword: kw, category: 'Custom' })
+                });
+                if(res.ok) {
+                    alert("Keyword added.");
+                    loadDashboard();
+                } else {
+                    alert("Failed to add keyword.");
+                }
+            } catch(e) {
+                alert("Error adding keyword.");
+            }
         }
         
         function checkTor() {

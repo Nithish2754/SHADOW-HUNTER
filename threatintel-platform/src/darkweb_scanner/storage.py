@@ -569,16 +569,13 @@ class Storage:
             ).first()
 
     def create_user(self, username: str, password_hash: str = None,
-                    email: str = None, oauth_provider: str = None,
-                    oauth_id: str = None, is_admin: bool = False,
+                    email: str = None, is_admin: bool = False,
                     must_change_password: bool = False):
         with self.get_session() as session:
             user = User(
                 username=username,
                 email=email,
                 password_hash=password_hash,
-                oauth_provider=oauth_provider,
-                oauth_id=oauth_id,
                 is_admin=is_admin,
                 must_change_password=must_change_password,
             )
