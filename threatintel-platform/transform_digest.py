@@ -1,4 +1,8 @@
-import logging
+import os
+
+def rewrite_digest_py():
+    with open("src/darkweb_scanner/digest.py", "w", encoding="utf-8") as f:
+        f.write('''import logging
 import os
 from datetime import datetime, timezone
 from io import BytesIO
@@ -39,3 +43,10 @@ def generate_pdf_report(storage: Storage) -> bytes:
     
     doc.build(story)
     return buf.getvalue()
+''')
+
+def main():
+    rewrite_digest_py()
+
+if __name__ == "__main__":
+    main()

@@ -1,4 +1,6 @@
-# Shadow Hunter
+import os
+
+README_CONTENT = """# Shadow Hunter
 
 **Illuminating Threats Before They Surface**
 
@@ -33,7 +35,7 @@ Shadow Hunter provides continuous dark web monitoring, searching for specific or
 2. Create a virtual environment:
    ```bash
    python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   source venv/bin/activate  # On Windows: venv\\Scripts\\activate
    ```
 
 3. Install requirements:
@@ -64,3 +66,35 @@ Access the dashboard at `http://127.0.0.1:5000`.
 
 ---
 Built by **ANVIO TECH**
+"""
+
+ENV_CONTENT = """SECRET_KEY=change-me-to-a-long-random-string
+
+DATABASE_URL=sqlite:///shadow_hunter.db
+
+TOR_PROXY=socks5://127.0.0.1:9050
+TOR_CONTROL_HOST=127.0.0.1
+TOR_CONTROL_PORT=9051
+
+VIRUSTOTAL_API_KEY=
+ABUSEIPDB_API_KEY=
+
+SMTP_HOST=
+SMTP_PORT=
+SMTP_USERNAME=
+SMTP_PASSWORD=
+ALERT_EMAIL=
+
+WEBHOOK_URL=
+
+DEMO_MODE=false
+"""
+
+def build_meta():
+    with open("README.md", "w", encoding="utf-8") as f:
+        f.write(README_CONTENT)
+    with open(".env.example", "w", encoding="utf-8") as f:
+        f.write(ENV_CONTENT)
+
+if __name__ == "__main__":
+    build_meta()

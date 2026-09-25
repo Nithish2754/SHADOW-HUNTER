@@ -3025,3 +3025,22 @@ def proxy_feodo():
         return jsonify({"error": "External request blocked by security policy."}), 502
 
 
+
+@dashboard_bp.route("/api/hits/<int:hit_id>", methods=["POST"])
+@require_login
+def update_hit(hit_id):
+    storage = get_storage()
+    data = request.json or {}
+    with storage.get_session() as session:
+        from src.darkweb_scanner.storage import KeywordHitRecord
+        record = session.get(KeywordHitRecord, hit_id)
+        if not record:
+            return jsonify({"error": "not found"}), 404
+        if "status" in data:
+            record.status = data["status"]
+        if "severity" in data:
+            record.severity = data["severity"]
+        if "notes" in data:
+            record.notes = data["notes"]
+        session.commit()
+        return jsonify({"success": True})

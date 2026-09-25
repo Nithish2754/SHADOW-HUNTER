@@ -1,4 +1,6 @@
-<!DOCTYPE html>
+import os
+
+HTML_CONTENT = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -757,3 +759,12 @@
     </script>
 </body>
 </html>
+"""
+
+def build_index_html():
+    os.makedirs("src/darkweb_scanner/dashboard/templates", exist_ok=True)
+    with open("src/darkweb_scanner/dashboard/templates/index.html", "w", encoding="utf-8") as f:
+        f.write(HTML_CONTENT)
+
+if __name__ == "__main__":
+    build_index_html()

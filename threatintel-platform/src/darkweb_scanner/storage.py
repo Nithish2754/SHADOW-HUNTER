@@ -33,8 +33,6 @@ class User(Base):
     password_hash = Column(String(255), nullable=True)  # None for OAuth-only users
     totp_secret = Column(String(64), nullable=True)
     totp_enabled = Column(Boolean, default=False)
-    oauth_provider = Column(String(50), nullable=True)  # "google" | "github" | None
-    oauth_id = Column(String(255), nullable=True)
     is_admin = Column(Boolean, default=False)
     must_change_password = Column(Boolean, default=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
@@ -43,7 +41,6 @@ class User(Base):
     __table_args__ = (
         Index("ix_users_username", "username"),
         Index("ix_users_email", "email"),
-        Index("ix_users_oauth", "oauth_provider", "oauth_id"),
     )
 
 
@@ -83,13 +80,18 @@ class KeywordHitRecord(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(Integer, nullable=True)
     url = Column(Text, nullable=False)
+    page_title = Column(Text, nullable=True)
     keyword = Column(String(500), nullable=False)
     category = Column(String(200), nullable=False)
+    severity = Column(String(50), default="LOW")  # CRITICAL, HIGH, MEDIUM, LOW
     context = Column(Text)
     position = Column(Integer)
     depth = Column(Integer, default=0)
     found_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
     alerted = Column(Boolean, default=False)
+    status = Column(String(50), default="NEW")  # NEW, INVESTIGATING, CONFIRMED, FALSE POSITIVE, RESOLVED
+    verified_by = Column(String(100), nullable=True)
+    notes = Column(Text, nullable=True)
 
     __table_args__ = (
         Index("ix_keyword_hits_keyword", "keyword"),
