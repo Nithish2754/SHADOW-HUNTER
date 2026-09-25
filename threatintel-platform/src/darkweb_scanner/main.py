@@ -104,7 +104,7 @@ async def run_scan(
         logger.info("Checking Tor connectivity...")
         if not await tor.check_connectivity():
             logger.error("Tor connectivity check failed. Is the Tor daemon running?")
-            sys.exit(1)
+            raise RuntimeError("Tor connectivity check failed. Please ensure Tor daemon is running on 127.0.0.1:9050.")
         logger.info("Tor connectivity confirmed.")
 
     session_id = storage.create_crawl_session(seeds)

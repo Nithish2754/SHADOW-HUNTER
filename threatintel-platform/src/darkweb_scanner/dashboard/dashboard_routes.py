@@ -82,7 +82,7 @@ def api_stats():
     return jsonify(get_storage().get_stats())
 
 
-@dashboard_bp.route("/api/hits")
+@dashboard_bp.route("/api/hits", methods=["GET"])
 @require_login
 def api_hits():
     limit = int(request.args.get("limit", 100))
@@ -98,16 +98,43 @@ def api_hits():
             {
                 "id": r.id,
                 "url": r.url,
+                "page_title": getattr(r, "page_title", None) or r.url,
                 "keyword": r.keyword,
                 "category": r.category,
+                "severity": getattr(r, "severity", None) or "LOW",
                 "context": r.context,
                 "depth": r.depth,
                 "found_at": r.found_at.isoformat() if r.found_at else None,
                 "alerted": r.alerted,
+                "status": getattr(r, "status", None) or "NEW",
+                "verified_by": getattr(r, "verified_by", None),
+                "notes": getattr(r, "notes", None),
             }
             for r in records
         ]
     )
+
+
+@dashboard_bp.route("/api/hits/<int:hit_id>", methods=["POST", "PATCH"])
+@require_login
+def api_hits_update_status(hit_id):
+    try:
+        body = request.get_json() or {}
+        new_status = body.get("status")
+        notes = body.get("notes")
+        if not new_status:
+            return jsonify({"error": "status required"}), 400
+        valid_statuses = ["NEW", "INVESTIGATING", "CONFIRMED", "FALSE POSITIVE", "RESOLVED"]
+        if new_status.upper() not in valid_statuses:
+            return jsonify({"error": f"Invalid status. Must be one of {valid_statuses}"}), 400
+        storage = get_storage()
+        username = session.get("username", "analyst")
+        ok = storage.update_hit_status(hit_id, new_status.upper(), verified_by=username, notes=notes)
+        if ok:
+            return jsonify({"ok": True})
+        return jsonify({"error": "Hit not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # â”€â”€ Keywords API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -204,7 +231,7 @@ def api_seeds_add():
             if url.startswith("http") and url not in existing:
                 existing.append(url)
                 added += 1
-        SEEDS_FILE.write_text("\n".join(existing, encoding="utf-8") + "\n")
+        SEEDS_FILE.write_text("\n".join(existing) + "\n", encoding="utf-8")
         return jsonify({"ok": True, "added": added})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -221,7 +248,7 @@ def api_seeds_delete():
 
         _ensure_data_dir()
         seeds = [s for s in _load_seeds() if s != url]
-        SEEDS_FILE.write_text("\n".join(seeds, encoding="utf-8") + "\n")
+        SEEDS_FILE.write_text("\n".join(seeds) + "\n", encoding="utf-8")
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -607,8 +634,8 @@ def api_crawl_start():
 def api_crawl_stop():
     try:
         _ensure_data_dir()
-        STOP_FLAG.write_text(datetime.now(timezone.utc, encoding="utf-8").replace(tzinfo=None).isoformat())
-        return jsonify({"ok": True, "message": "Stop signal sent â€” crawl will halt after current page."})
+        STOP_FLAG.write_text(datetime.now(timezone.utc).replace(tzinfo=None).isoformat(), encoding="utf-8")
+        return jsonify({"ok": True, "message": "Stop signal sent — crawl will halt after current page."})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -660,6 +687,150 @@ def api_crawl_status():
             "session": session_data,
             "stats": stats,
         })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@dashboard_bp.route("/api/tor/status", methods=["GET"])
+@require_login
+def api_tor_status():
+    try:
+        from ..tor_client import create_tor_client
+        import asyncio
+        tor = create_tor_client()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            connected = loop.run_until_complete(tor.check_connectivity())
+        finally:
+            loop.close()
+        return jsonify({"connected": connected, "status": "Connected" if connected else "Offline"})
+    except Exception as e:
+        return jsonify({"connected": False, "status": "Offline", "error": str(e)})
+
+
+@dashboard_bp.route("/api/sources", methods=["GET"])
+@require_login
+def api_sources_get():
+    try:
+        storage = get_storage()
+        db_sources = storage.get_monitoring_sources()
+        seed_urls = _load_seeds()
+        
+        # Ensure all seed URLs exist in DB
+        db_urls = {s.url for s in db_sources}
+        for url in seed_urls:
+            if url not in db_urls and ".onion" in url:
+                storage.add_monitoring_source(url=url, name=url)
+        
+        db_sources = storage.get_monitoring_sources()
+        sources_list = []
+        for s in db_sources:
+            sources_list.append({
+                "id": s.id,
+                "url": s.url,
+                "name": s.name or s.url,
+                "status": s.status or "ACTIVE",
+                "max_depth": s.max_depth or 2,
+                "max_pages": s.max_pages or 50,
+                "pages_crawled": s.pages_crawled or 0,
+                "findings_count": s.findings_count or 0,
+                "last_scan": s.last_scan.isoformat() if s.last_scan else None,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+            })
+        return jsonify({"sources": sources_list})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@dashboard_bp.route("/api/sources", methods=["POST"])
+@require_login
+def api_sources_add():
+    try:
+        body = request.get_json() or {}
+        url = (body.get("url") or "").strip()
+        name = (body.get("name") or "").strip() or url
+        max_depth = int(body.get("max_depth", 2))
+        max_pages = int(body.get("max_pages", 50))
+
+        if not url:
+            return jsonify({"error": ".onion URL is required"}), 400
+
+        # Validate that URL is a valid .onion address (Req 3, 21, 22)
+        if ".onion" not in url.lower():
+            return jsonify({"error": "Invalid source URL. Must be a valid .onion address."}), 400
+
+        if not (url.startswith("http://") or url.startswith("https://")):
+            url = "http://" + url
+
+        storage = get_storage()
+        source_id = storage.add_monitoring_source(url=url, name=name, max_depth=max_depth, max_pages=max_pages)
+
+        # Sync to seeds.txt
+        _ensure_data_dir()
+        seeds = _load_seeds()
+        if url not in seeds:
+            seeds.append(url)
+            SEEDS_FILE.write_text("\n".join(seeds) + "\n", encoding="utf-8")
+
+        return jsonify({"ok": True, "id": source_id, "url": url})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@dashboard_bp.route("/api/sources/<int:source_id>", methods=["DELETE"])
+@dashboard_bp.route("/api/sources", methods=["DELETE"])
+@require_login
+def api_sources_delete(source_id=None):
+    try:
+        storage = get_storage()
+        if source_id is None:
+            body = request.get_json() or {}
+            source_id = body.get("id")
+            url = body.get("url")
+            if not source_id and url:
+                sources = storage.get_monitoring_sources()
+                for s in sources:
+                    if s.url == url:
+                        source_id = s.id
+                        break
+
+        if not source_id:
+            return jsonify({"error": "source_id or url required"}), 400
+
+        source = storage.get_monitoring_source_by_id(source_id)
+        if source:
+            url = source.url
+            storage.delete_monitoring_source(source_id)
+            # Sync seeds file
+            seeds = [s for s in _load_seeds() if s != url]
+            _ensure_data_dir()
+            SEEDS_FILE.write_text("\n".join(seeds) + "\n", encoding="utf-8")
+            return jsonify({"ok": True})
+        return jsonify({"error": "Source not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@dashboard_bp.route("/api/crawl/activity", methods=["GET"])
+@require_login
+def api_crawl_activity():
+    try:
+        limit = int(request.args.get("limit", 20))
+        storage = get_storage()
+        pages = storage.get_recent_crawled_pages(limit=limit)
+        activity = []
+        for p in pages:
+            activity.append({
+                "id": p.id,
+                "url": p.url,
+                "depth": p.depth,
+                "status_code": p.status_code,
+                "crawled_at": p.crawled_at.isoformat() if p.crawled_at else None,
+                "had_error": p.had_error,
+                "error_message": p.error_message,
+            })
+        return jsonify({"activity": activity})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1406,40 +1577,53 @@ def api_public_subscribe():
 @require_login
 def api_dns_list():
     storage = get_storage()
-    return jsonify(storage.get_dns_investigations(limit=100))
+    items = storage.get_dns_investigations(limit=50)
+    formatted = []
+    for item in items:
+        target = item.get("domain", "Unknown")
+        resolved_count = item.get("resolved_count", 0)
+        status = (item.get("status") or "complete").capitalize()
+        dt_str = item.get("created_at") or ""
+        if dt_str:
+            try:
+                dt_obj = datetime.fromisoformat(dt_str)
+                dt_str = dt_obj.strftime("%d %b %Y %H:%M")
+            except Exception:
+                pass
+        target_type = "Domain"
+        if ":" in target or (target.replace(".", "").isdigit()):
+            target_type = "IP Address"
+
+        formatted.append({
+            "id": item["id"],
+            "target": target,
+            "target_type": target_type,
+            "resolved_count": resolved_count,
+            "status": status,
+            "date": dt_str,
+        })
+    return jsonify(formatted), 200
 
 
 @dashboard_bp.route("/api/dns/investigate", methods=["POST"])
 @require_login
 def api_dns_start():
-    """Start a DNS investigation â€” runs in background thread."""
-    import threading
-    from ..dns_crawler import run_dns_recon
+    from ..dns_ip_investigator import run_infrastructure_investigation
 
-    body = request.get_json() or {}
-    domain = (body.get("domain") or "").strip().lower()
-    if not domain:
-        return jsonify({"error": "domain required"}), 400
-    # Basic sanity check
-    if len(domain) > 253 or " " in domain:
-        return jsonify({"error": "invalid domain"}), 400
+    body = request.get_json(silent=True) or {}
+    target = (body.get("target") or body.get("domain") or "").strip()
+    if not target:
+        return jsonify({"error": "Target domain or IP address is required."}), 400
+
+    result = run_infrastructure_investigation(target)
+    if not result.get("valid", True):
+        return jsonify({"error": result.get("error", "Invalid investigation target.")}), 400
 
     storage = get_storage()
-    inv_id = storage.create_dns_investigation(domain)
+    inv_id = storage.save_infrastructure_investigation(result)
+    result["id"] = inv_id
 
-    def run():
-        try:
-            result = run_dns_recon(domain)
-            storage.complete_dns_investigation(inv_id, result)
-        except Exception as e:
-            import traceback
-            storage.fail_dns_investigation(inv_id, str(e))
-            print(f"DNS investigation {inv_id} failed: {traceback.format_exc()}", flush=True)
-
-    t = threading.Thread(target=run, daemon=True)
-    t.start()
-
-    return jsonify({"ok": True, "id": inv_id, "domain": domain})
+    return jsonify(result), 200
 
 
 @dashboard_bp.route("/api/dns/investigations/<int:inv_id>", methods=["GET"])
@@ -1448,8 +1632,13 @@ def api_dns_get(inv_id: int):
     storage = get_storage()
     result = storage.get_dns_investigation(inv_id)
     if not result:
-        return jsonify({"error": "not found"}), 404
-    return jsonify(result)
+        return jsonify({"error": "Investigation not found."}), 404
+    # If stored result JSON contains full investigation payload
+    res_dict = result.get("result", {})
+    if isinstance(res_dict, dict) and res_dict.get("valid"):
+        res_dict["id"] = inv_id
+        return jsonify(res_dict), 200
+    return jsonify(result), 200
 
 
 @dashboard_bp.route("/api/dns/investigations/<int:inv_id>", methods=["DELETE"])
@@ -2962,6 +3151,116 @@ def api_quick_scan_findings(session_id):
     ])
 
 
+@dashboard_bp.route("/api/quickscan/investigate", methods=["POST"])
+@require_login
+def api_quickscan_investigate():
+    import asyncio
+    from ..osint_scanner import run_osint_investigation
+
+    storage = get_storage()
+    body = request.get_json(silent=True) or {}
+    indicator = (body.get("indicator") or "").strip()
+    indicator_type = body.get("indicator_type", "auto")
+
+    if not indicator:
+        return jsonify({"error": "Indicator cannot be empty."}), 400
+
+    try:
+        scan_result = asyncio.run(run_osint_investigation(indicator, indicator_type))
+    except Exception as exc:
+        logger.exception("Error running OSINT investigation")
+        return jsonify({"error": f"Investigation error: {exc}"}), 400
+
+    if not scan_result.get("valid", True):
+        return jsonify({"error": scan_result.get("error", "Invalid indicator")}), 400
+
+    user_id = session.get("user_id", 1)
+    session_id = storage.save_osint_investigation(user_id, scan_result)
+    scan_result["session_id"] = session_id
+
+    return jsonify(scan_result), 200
+
+
+@dashboard_bp.route("/api/quickscan/history", methods=["GET"])
+@require_login
+def api_quickscan_history():
+    storage = get_storage()
+    user_id = session.get("user_id", 1)
+    sessions = storage.list_quick_scan_sessions(user_id, limit=50)
+    history = []
+    for s in sessions:
+        sources = []
+        if s.sources_used:
+            try:
+                sources = json.loads(s.sources_used)
+            except Exception:
+                sources = []
+        dt = s.completed_at or s.started_at
+        history.append({
+            "id": s.id,
+            "indicator": s.target_value,
+            "indicator_type": s.target_type,
+            "sources": sources,
+            "sources_count": len(sources),
+            "status": s.status.capitalize() if s.status else "Completed",
+            "date": dt.strftime("%d %b %Y %H:%M") if dt else "N/A",
+            "findings_count": s.findings_count,
+        })
+    return jsonify(history), 200
+
+
+@dashboard_bp.route("/api/quickscan/history/<int:session_id>", methods=["GET"])
+@require_login
+def api_quickscan_history_detail(session_id):
+    storage = get_storage()
+    sess = storage.get_quick_scan_session(session_id)
+    if not sess:
+        return jsonify({"error": "Investigation not found"}), 404
+    if sess.user_id != session.get("user_id", 1):
+        return jsonify({"error": "Forbidden"}), 403
+
+    findings = storage.list_quick_scan_findings(session_id)
+    provider_results = []
+    malicious_count = 0
+    suspicious_count = 0
+    reports_count = 0
+
+    for f in findings:
+        res_data = {}
+        if f.context:
+            try:
+                res_data = json.loads(f.context)
+            except Exception:
+                pass
+        if not res_data:
+            res_data = {
+                "provider": f.source_name,
+                "indicator": f.url,
+                "indicator_type": f.matched_variant,
+                "status": "available",
+            }
+        provider_results.append(res_data)
+        malicious_count += res_data.get("malicious", 0)
+        suspicious_count += res_data.get("suspicious", 0)
+        reports_count += res_data.get("total_reports", 0)
+
+    scan_result = {
+        "valid": True,
+        "indicator": sess.target_value,
+        "indicator_type": sess.target_type,
+        "session_id": sess.id,
+        "summary": {
+            "sources_checked": len(provider_results),
+            "malicious_count": malicious_count,
+            "suspicious_count": suspicious_count,
+            "reports_count": reports_count,
+        },
+        "results": provider_results,
+    }
+    return jsonify(scan_result), 200
+
+
+
 # GöÇGöÇ Health GöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇ
 
 
@@ -3044,3 +3343,90 @@ def update_hit(hit_id):
             record.notes = data["notes"]
         session.commit()
         return jsonify({"success": True})
+
+
+# ── Real-Time Alerting API ───────────────────────────────────────────────────
+
+@dashboard_bp.route("/api/alerts/config", methods=["GET"])
+@require_login
+def api_alerts_config_get():
+    storage = get_storage()
+    from ..alerting import Alerter
+    alerter = Alerter(storage)
+    config = storage.get_alert_config()
+    smtp = alerter.get_smtp_config()
+    config["smtp_configured"] = bool(smtp["host"] and smtp["username"])
+    config["webhook_configured"] = bool(config.get("webhook_url"))
+    return jsonify(config), 200
+
+
+@dashboard_bp.route("/api/alerts/config", methods=["POST"])
+@require_login
+def api_alerts_config_post():
+    storage = get_storage()
+    body = request.get_json(silent=True) or {}
+    email_enabled = bool(body.get("email_enabled", False))
+    email_recipient = (body.get("email_recipient") or "").strip()
+    webhook_enabled = bool(body.get("webhook_enabled", False))
+    webhook_url = (body.get("webhook_url") or "").strip()
+    min_severity = (body.get("min_severity") or "HIGH").strip().upper()
+
+    if min_severity not in ("LOW", "MEDIUM", "HIGH", "CRITICAL"):
+        return jsonify({"error": f"Invalid severity threshold {min_severity!r}"}), 400
+
+    if webhook_enabled and webhook_url:
+        from ..alerting import validate_webhook_url
+        valid, err = validate_webhook_url(webhook_url)
+        if not valid:
+            return jsonify({"error": f"Webhook URL security check failed: {err}"}), 400
+
+    config = storage.save_alert_config(
+        email_enabled=email_enabled,
+        email_recipient=email_recipient,
+        webhook_enabled=webhook_enabled,
+        webhook_url=webhook_url,
+        min_severity=min_severity,
+    )
+    from ..alerting import Alerter
+    alerter = Alerter(storage)
+    smtp = alerter.get_smtp_config()
+    config["smtp_configured"] = bool(smtp["host"] and smtp["username"])
+    config["webhook_configured"] = bool(config.get("webhook_url"))
+
+    return jsonify({"success": True, "config": config}), 200
+
+
+@dashboard_bp.route("/api/alerts/test", methods=["POST"])
+@require_login
+def api_alerts_test():
+    storage = get_storage()
+    from ..alerting import Alerter
+    alerter = Alerter(storage)
+    results = alerter.send_test_alert()
+    return jsonify(results), 200
+
+
+@dashboard_bp.route("/api/alerts/history", methods=["GET"])
+@require_login
+def api_alerts_history():
+    storage = get_storage()
+    history = storage.get_alert_history(limit=50)
+    return jsonify(history), 200
+
+
+@dashboard_bp.route("/api/alerts/<int:alert_id>/retry", methods=["POST"])
+@require_login
+def api_alerts_retry(alert_id: int):
+    storage = get_storage()
+    from ..alerting import Alerter
+    alerter = Alerter(storage)
+    res = alerter.retry_alert(alert_id)
+    return jsonify(res), 200
+
+
+@dashboard_bp.route("/api/hits/<int:hit_id>/alerts", methods=["GET"])
+@require_login
+def api_hit_alerts(hit_id: int):
+    storage = get_storage()
+    alerts = storage.get_alerts_for_finding(hit_id)
+    return jsonify(alerts), 200

@@ -101,6 +101,49 @@ class KeywordHitRecord(Base):
     )
 
 
+class MonitoringSource(Base):
+    __tablename__ = "monitoring_sources"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    url = Column(Text, nullable=False, unique=True)
+    name = Column(String(255), nullable=True)
+    status = Column(String(50), default="ACTIVE")  # ACTIVE, STOPPED, MONITORING, ERROR
+    max_depth = Column(Integer, default=2)
+    max_pages = Column(Integer, default=50)
+    pages_crawled = Column(Integer, default=0)
+    findings_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    last_scan = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_monitoring_sources_url", "url"),
+    )
+
+
+class AlertRecord(Base):
+    __tablename__ = "alerts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    finding_id = Column(Integer, nullable=True)
+    channel = Column(String(50), nullable=False)   # EMAIL | WEBHOOK
+    severity = Column(String(50), nullable=False)  # LOW, MEDIUM, HIGH, CRITICAL
+    status = Column(String(50), default="PENDING") # PENDING | SENT | FAILED
+    recipient = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    sent_at = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)
+
+
+class AlertConfigRecord(Base):
+    __tablename__ = "alert_configs"
+
+    id = Column(Integer, primary_key=True, default=1)
+    email_enabled = Column(Boolean, default=False)
+    email_recipient = Column(String(255), nullable=True)
+    webhook_enabled = Column(Boolean, default=False)
+    webhook_url = Column(Text, nullable=True)
+    min_severity = Column(String(50), default="HIGH")
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 
 class Investigation(Base):
@@ -444,21 +487,65 @@ class Storage:
         position: int,
         depth: int,
         session_id: Optional[int] = None,
+        severity: Optional[str] = None,
+        page_title: Optional[str] = None,
     ) -> int:
+        def determine_severity(kw: str, ctx: str) -> str:
+            combined = f"{kw} {ctx}".lower()
+            critical_terms = ["password", "credential", "api key", "apikey", "auth token", "private key", "secret key", "database credential"]
+            if any(term in combined for term in critical_terms):
+                return "CRITICAL"
+            high_terms = ["email", "@", "customer data", "internal document", "confidential", "ssn", "tax id", "leak", "dump", "database"]
+            if any(term in combined for term in high_terms):
+                return "HIGH"
+            medium_terms = ["company", ".com", ".org", "admin", "login", "product"]
+            if any(term in combined for term in medium_terms):
+                return "MEDIUM"
+            return "LOW"
+
+        if not severity:
+            severity = determine_severity(keyword, context or "")
+
         with self.get_session() as session:
             record = KeywordHitRecord(
                 session_id=session_id,
                 url=url,
+                page_title=page_title,
                 keyword=keyword,
                 category=category,
+                severity=severity,
                 context=context,
                 position=position,
                 depth=depth,
+                status="NEW",
             )
             session.add(record)
             session.commit()
             session.refresh(record)
-            return record.id
+            hit_id = record.id
+
+        try:
+            import threading
+            from .alerting import Alerter
+            alerter = Alerter(self)
+            threading.Thread(target=alerter.dispatch_finding_alert, args=(hit_id,), daemon=True).start()
+        except Exception as exc:
+            logger.warning(f"Alert dispatcher thread error: {exc}")
+
+        return hit_id
+
+    def update_hit_status(self, hit_id: int, status: str, verified_by: Optional[str] = None, notes: Optional[str] = None):
+        with self.get_session() as session:
+            record = session.get(KeywordHitRecord, hit_id)
+            if record:
+                record.status = status
+                if verified_by:
+                    record.verified_by = verified_by
+                if notes:
+                    record.notes = notes
+                session.commit()
+                return True
+            return False
 
     def mark_alerted(self, hit_id: int):
         with self.get_session() as session:
@@ -545,6 +632,60 @@ class Storage:
                 "total_sessions": total_sessions or 0,
                 "top_keywords": [{"keyword": k, "count": c} for k, c in top_keywords],
             }
+
+    # --- Monitoring Sources ---
+
+    def add_monitoring_source(self, url: str, name: Optional[str] = None, max_depth: int = 2, max_pages: int = 50) -> int:
+        with self.get_session() as session:
+            existing = session.query(MonitoringSource).filter(MonitoringSource.url == url).first()
+            if existing:
+                existing.name = name or existing.name
+                existing.max_depth = max_depth
+                existing.max_pages = max_pages
+                session.commit()
+                return existing.id
+            record = MonitoringSource(url=url, name=name or url, max_depth=max_depth, max_pages=max_pages)
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record.id
+
+    def get_monitoring_sources(self) -> list[MonitoringSource]:
+        with self.get_session() as session:
+            return session.query(MonitoringSource).order_by(MonitoringSource.created_at.desc()).all()
+
+    def get_monitoring_source_by_id(self, source_id: int) -> Optional[MonitoringSource]:
+        with self.get_session() as session:
+            return session.get(MonitoringSource, source_id)
+
+    def delete_monitoring_source(self, source_id: int) -> bool:
+        with self.get_session() as session:
+            record = session.get(MonitoringSource, source_id)
+            if record:
+                session.delete(record)
+                session.commit()
+                return True
+            return False
+
+    def update_source_scan_stats(self, url: str, status: str, pages_crawled: int = 0, findings_count: int = 0):
+        with self.get_session() as session:
+            record = session.query(MonitoringSource).filter(MonitoringSource.url == url).first()
+            if record:
+                record.status = status
+                record.last_scan = datetime.now(timezone.utc).replace(tzinfo=None)
+                record.pages_crawled = (record.pages_crawled or 0) + pages_crawled
+                record.findings_count = (record.findings_count or 0) + findings_count
+                session.commit()
+
+    def get_recent_crawled_pages(self, limit: int = 20) -> list[CrawledPage]:
+        with self.get_session() as session:
+            return (
+                session.query(CrawledPage)
+                .order_by(CrawledPage.crawled_at.desc())
+                .limit(limit)
+                .all()
+            )
+
 
 
     # --- Users ---
@@ -964,7 +1105,22 @@ class Storage:
             if r:
                 r.status = "error"
                 r.error = error[:500]
-                session.commit()
+    def save_infrastructure_investigation(self, result: dict) -> int:
+        with self.get_session() as session:
+            target = result.get("target", "unknown")
+            resolved_ips = result.get("resolved_ips", [])
+            rec = DNSInvestigation(
+                domain=target,
+                status="complete",
+                result_json=json.dumps(result),
+                subdomain_count=len(result.get("infrastructure_tree", [])),
+                resolved_count=len(resolved_ips),
+                created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+            session.add(rec)
+            session.commit()
+            session.refresh(rec)
+            return rec.id
 
     def get_dns_investigations(self, limit: int = 50) -> list[dict]:
         with self.get_session() as session:
@@ -1466,3 +1622,190 @@ class Storage:
                 .first()
             )
             return record is not None
+
+    def save_osint_investigation(self, user_id: int, scan_result: dict) -> int:
+        with self.get_session() as session:
+            sources_checked = [r["provider"] for r in scan_result.get("results", [])]
+            rec = QuickScanSession(
+                user_id=user_id,
+                target_value=scan_result.get("indicator", ""),
+                target_type=scan_result.get("indicator_type", "unknown"),
+                normalized_variants=json.dumps([scan_result.get("indicator", "")]),
+                sources_used=json.dumps(sources_checked),
+                status="completed",
+                completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                urls_visited=len(sources_checked),
+                findings_count=scan_result.get("summary", {}).get("malicious_count", 0),
+            )
+            session.add(rec)
+            session.commit()
+            session.refresh(rec)
+
+            for res in scan_result.get("results", []):
+                finding = QuickScanFinding(
+                    session_id=rec.id,
+                    source_name=res.get("provider", "Unknown"),
+                    url=res.get("indicator", ""),
+                    matched_variant=res.get("indicator_type", ""),
+                    context=json.dumps(res),
+                    high_signal=(
+                        res.get("malicious", 0) > 0
+                        or res.get("suspicious", 0) > 0
+                        or res.get("abuse_confidence_score", 0) > 0
+                    ),
+                )
+                session.add(finding)
+            session.commit()
+            return rec.id
+
+    # ── Alert Storage Methods ──────────────────────────────────────────────
+
+    def get_alert_config(self) -> dict:
+        with self.get_session() as session:
+            rec = session.get(AlertConfigRecord, 1)
+            if not rec:
+                return {
+                    "email_enabled": bool(os.getenv("ALERT_EMAIL")),
+                    "email_recipient": os.getenv("ALERT_EMAIL", ""),
+                    "webhook_enabled": bool(os.getenv("WEBHOOK_URL")),
+                    "webhook_url": os.getenv("WEBHOOK_URL", ""),
+                    "min_severity": os.getenv("ALERT_MIN_SEVERITY", "HIGH"),
+                }
+            return {
+                "email_enabled": bool(rec.email_enabled),
+                "email_recipient": rec.email_recipient or os.getenv("ALERT_EMAIL", ""),
+                "webhook_enabled": bool(rec.webhook_enabled),
+                "webhook_url": rec.webhook_url or os.getenv("WEBHOOK_URL", ""),
+                "min_severity": rec.min_severity or "HIGH",
+            }
+
+    def save_alert_config(
+        self,
+        email_enabled: bool,
+        email_recipient: str,
+        webhook_enabled: bool,
+        webhook_url: str,
+        min_severity: str = "HIGH",
+    ) -> dict:
+        with self.get_session() as session:
+            rec = session.get(AlertConfigRecord, 1)
+            if not rec:
+                rec = AlertConfigRecord(id=1)
+                session.add(rec)
+            rec.email_enabled = email_enabled
+            rec.email_recipient = (email_recipient or "").strip()
+            rec.webhook_enabled = webhook_enabled
+            rec.webhook_url = (webhook_url or "").strip()
+            rec.min_severity = (min_severity or "HIGH").upper()
+            rec.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            session.commit()
+            return {
+                "email_enabled": rec.email_enabled,
+                "email_recipient": rec.email_recipient,
+                "webhook_enabled": rec.webhook_enabled,
+                "webhook_url": rec.webhook_url,
+                "min_severity": rec.min_severity,
+            }
+
+    def create_alert_record(
+        self,
+        finding_id: Optional[int],
+        channel: str,
+        severity: str,
+        recipient: str,
+        status: str = "PENDING",
+    ) -> int:
+        with self.get_session() as session:
+            rec = AlertRecord(
+                finding_id=finding_id,
+                channel=channel.upper(),
+                severity=severity.upper(),
+                recipient=recipient,
+                status=status.upper(),
+                created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+            session.add(rec)
+            session.commit()
+            session.refresh(rec)
+            return rec.id
+
+    def update_alert_record(
+        self,
+        alert_id: int,
+        status: str,
+        sent_at: Optional[datetime] = None,
+        error_message: Optional[str] = None,
+    ):
+        with self.get_session() as session:
+            rec = session.get(AlertRecord, alert_id)
+            if rec:
+                rec.status = status.upper()
+                if sent_at:
+                    rec.sent_at = sent_at
+                if error_message:
+                    rec.error_message = error_message[:500]
+                session.commit()
+
+    def get_alert_history(self, limit: int = 50) -> list[dict]:
+        with self.get_session() as session:
+            rows = (
+                session.query(AlertRecord)
+                .order_by(AlertRecord.created_at.desc())
+                .limit(limit)
+                .all()
+            )
+            out = []
+            for r in rows:
+                finding_kw = "Test Alert"
+                if r.finding_id:
+                    hit = session.get(KeywordHitRecord, r.finding_id)
+                    if hit:
+                        finding_kw = hit.keyword
+                out.append({
+                    "id": r.id,
+                    "finding_id": r.finding_id,
+                    "finding_keyword": finding_kw,
+                    "channel": r.channel,
+                    "severity": r.severity,
+                    "status": r.status,
+                    "recipient": r.recipient,
+                    "error_message": r.error_message,
+                    "created_at": r.created_at.strftime("%H:%M:%S") if r.created_at else "N/A",
+                    "date": r.created_at.strftime("%d %b %Y %H:%M") if r.created_at else "N/A",
+                })
+            return out
+
+    def get_alerts_for_finding(self, finding_id: int) -> list[dict]:
+        with self.get_session() as session:
+            rows = (
+                session.query(AlertRecord)
+                .filter(AlertRecord.finding_id == finding_id)
+                .order_by(AlertRecord.created_at.asc())
+                .all()
+            )
+            return [
+                {
+                    "id": r.id,
+                    "channel": r.channel,
+                    "severity": r.severity,
+                    "status": r.status,
+                    "sent_at": r.sent_at.isoformat() if r.sent_at else None,
+                    "error_message": r.error_message,
+                }
+                for r in rows
+            ]
+
+    def has_finding_alert(self, finding_id: int, channel: str) -> bool:
+        with self.get_session() as session:
+            rec = (
+                session.query(AlertRecord.id)
+                .filter(
+                    AlertRecord.finding_id == finding_id,
+                    AlertRecord.channel == channel.upper(),
+                    AlertRecord.status == "SENT",
+                )
+                .first()
+            )
+            return rec is not None
+
+
